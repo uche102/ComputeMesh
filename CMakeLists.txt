@@ -25,3 +25,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Wshadow
     )
 endif()
+enable_testing()
+
+add_executable(parser_tests
+    tests/test_parser.cpp
+    src/circuit_parser.cpp
+)
+
+target_include_directories(parser_tests PRIVATE include)
+
+add_test(NAME ParserTests COMMAND parser_tests)
