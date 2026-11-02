@@ -35,3 +35,11 @@ add_executable(parser_tests
 target_include_directories(parser_tests PRIVATE include)
 
 add_test(NAME ParserTests COMMAND parser_tests)
+add_executable(validator_tests
+    tests/test_validator.cpp
+    src/circuit_validator.cpp
+)
+
+target_include_directories(validator_tests PRIVATE include)
+
+add_test(NAME ValidatorTests COMMAND validator_tests)
