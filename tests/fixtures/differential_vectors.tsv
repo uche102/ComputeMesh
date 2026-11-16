@@ -1,0 +1,5 @@
+nand_both_true	2	1	00000002000003		03		00
+latch_state_update	1	1	01000002	00	01	01	00
+latch_state_clear	1	1	01000002	01	00	00	01
+latch_independent_states	2	2	0100000201000003	02	01	01	02
+latch_state_hold	1	1	01000002	01	01	01	01

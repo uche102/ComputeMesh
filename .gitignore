@@ -10,3 +10,14 @@ cmake-build-*/
 
 # IDE files
 .vscode/
+
+# Local secrets and Python environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
