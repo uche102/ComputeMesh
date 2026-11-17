@@ -15,6 +15,10 @@ const xlayerRpc = (import.meta.env.VITE_XLAYER_RPC_URL || "https://rpc.xlayer.te
 const xlayerChainId = Number(import.meta.env.VITE_XLAYER_CHAIN_ID || "196");
 const xlayerProcessor = (import.meta.env.VITE_XLAYER_PROCESSOR || "0x839bdD6fA7A66416A609A735E11De5411B98574E") as string;
 const xlayerCircuitId = Number(import.meta.env.VITE_XLAYER_CIRCUIT_ID || "1");
+const defaultRegisteredProcessor = xlayerProcessor.replace(/^0x/i, "").toLowerCase();
+const defaultRegisteredCircuitId = Number.isSafeInteger(xlayerCircuitId) && xlayerCircuitId > 0
+  ? xlayerCircuitId.toString(16).padStart(16, "0")
+  : "";
 const xlayerConfigError = (() => {
   try {
     new URL(xlayerRpc);
@@ -52,6 +56,7 @@ function App() {
     rootProcessor: "00".repeat(20), rootId: "0000000000000001",
   });
   const [result, setResult] = useState<boolean | null>(null);
+  const [registeredCircuit, setRegisteredCircuit] = useState({ processor: defaultRegisteredProcessor, circuitId: defaultRegisteredCircuitId, commitment: null as string | null });
   const [xlayer, setXlayer] = useState<{ block: string; metadata: string; netlist: string; rows: Array<{ input: string; local: string; remote: string; match: boolean }> } | null>(null);
 
   const chain = networks[network];
@@ -108,6 +113,22 @@ function App() {
     } catch (e) { setStatus("Verification failed"); setError(e instanceof Error ? e.message : String(e)); }
   }
 
+  async function checkRegisteredCircuit() {
+    setError(""); setStatus("Checking registered circuit…");
+    setRegisteredCircuit((current) => ({ ...current, commitment: null }));
+    try {
+      const address = requireContract();
+      const processor = registeredCircuit.processor.trim();
+      const circuitId = registeredCircuit.circuitId.trim();
+      if (!/^[0-9a-fA-F]{40}$/.test(processor)) throw new Error("Processor address must be exactly 40 hexadecimal characters without 0x.");
+      if (!/^[0-9a-fA-F]{16}$/.test(circuitId)) throw new Error("Circuit ID must be exactly 16 hexadecimal characters.");
+      const commitment = await client.readContract({ address, functionName: "get_registered_commitment", args: [processor.toLowerCase(), circuitId.toLowerCase()] });
+      if (typeof commitment !== "string") throw new Error("The contract returned an invalid commitment value.");
+      setRegisteredCircuit((current) => ({ ...current, commitment }));
+      setStatus("Registered circuit lookup complete");
+    } catch (e) { setStatus("Registered circuit lookup failed"); setError(e instanceof Error ? e.message : String(e)); }
+  }
+
   async function loadXLayerCircuit() {
     setError(""); setStatus("Reading X Layer TapeOut circuit…"); setXlayer(null);
     try {
@@ -137,7 +158,8 @@ function App() {
     <section className="hero"><div><p className="eyebrow">TAP-02 execution layer</p><h1>Run circuits.<br /><em>Verify the result.</em></h1><p className="lede">ComputeMesh executes NAND, LATCH, and nested REF circuits locally, then asks GenLayer to independently verify the commitment and state transition.</p></div><div className="status-card"><span className="pulse" />{status}<small>{contractAddress ? `Contract ${contractAddress.slice(0, 10)}…` : "No contract address configured"}</small></div></section>
     <section className="grid"><article className="panel"><div className="panel-head"><div><span className="step">01</span><h2>Register a circuit</h2></div><span className="tag">WALLET WRITE</span></div><p className="hint">Registration binds a processor and circuit ID to its SHA-256 commitment. Only the contract administrator may register.</p><Field label="Processor address" value={registration.processor} onChange={(v) => setRegistration({ ...registration, processor: v })} placeholder="40 hex characters" /><div className="two"><Field label="Circuit ID" value={registration.id} onChange={(v) => setRegistration({ ...registration, id: v })} placeholder="16 hex characters" /><Field label="Commitment" value={registration.commitment} onChange={(v) => setRegistration({ ...registration, commitment: v })} placeholder="64 hex characters" /></div><button className="primary" onClick={registerCircuit}>Register circuit <span>↗</span></button></article>
       <article className="panel"><div className="panel-head"><div><span className="step">02</span><h2>Verify execution</h2></div><span className="tag">CONTRACT READ</span></div><p className="hint">Submit the exact packed buffers and child records used by the execution evidence.</p><div className="two"><Field label="Input bits" value={verification.inputs} onChange={(v) => setVerification({ ...verification, inputs: v })} /><Field label="Output bits" value={verification.outputs} onChange={(v) => setVerification({ ...verification, outputs: v })} /></div><Field label="Netlist · hex" value={verification.netlist} onChange={(v) => setVerification({ ...verification, netlist: v })} /><Field label="Commitment · hex" value={verification.commitment} onChange={(v) => setVerification({ ...verification, commitment: v })} placeholder="SHA-256 commitment" /><div className="two"><Field label="Initial state · hex" value={verification.state} onChange={(v) => setVerification({ ...verification, state: v })} /><Field label="Inputs · packed hex" value={verification.inputBits} onChange={(v) => setVerification({ ...verification, inputBits: v })} /></div><div className="two"><Field label="Next state · hex" value={verification.nextState} onChange={(v) => setVerification({ ...verification, nextState: v })} /><Field label="Outputs · packed hex" value={verification.outputBits} onChange={(v) => setVerification({ ...verification, outputBits: v })} /></div><Field label="Child records · JSON array" value={verification.children} onChange={(v) => setVerification({ ...verification, children: v })} /><div className="two"><Field label="Root processor" value={verification.rootProcessor} onChange={(v) => setVerification({ ...verification, rootProcessor: v })} /><Field label="Root circuit ID" value={verification.rootId} onChange={(v) => setVerification({ ...verification, rootId: v })} /></div><button className="primary" onClick={verifyExecution}>Verify execution <span>→</span></button>{result !== null && <div className={`result ${result ? "pass" : "fail"}`}>{result ? "✓ Execution accepted" : "× Execution rejected"}</div>}</article></section>
-    <article className="panel xlayer-panel"><div className="panel-head"><div><span className="step">03</span><h2>Live TapeOut comparison</h2></div><span className="tag">X LAYER · 196</span></div><p className="hint">Read-only verification against the existing TapeOut processor on X Layer Mainnet. No X Layer private key is required.</p><div className="xmeta"><span>Processor <code>{xlayerProcessor}</code></span><span>Circuit <code>#{xlayerCircuitId}</code></span><span>RPC <code>{xlayerRpc}</code></span></div><button className="primary" onClick={loadXLayerCircuit}>Retrieve & compare on-chain <span>↗</span></button>{xlayer && <><p className="xmeta">Block <code>{xlayer.block}</code> · Metadata <code>{xlayer.metadata}</code></p><div className="table"><div>Input</div><div>ComputeMesh</div><div>TapeOut eval</div><div>Status</div>{xlayer.rows.map((row) => <div className="table-row" key={row.input}><code>{row.input}</code><code>{row.local}</code><code>{row.remote}</code><strong className={row.match ? "match" : "mismatch"}>{row.match ? "MATCH" : "MISMATCH"}</strong></div>)}</div></>}</article>
+    <article className="panel registered-panel"><div className="panel-head"><div><span className="step">03</span><h2>Check Registered Circuit</h2></div><span className="tag">READ ONLY</span></div><p className="hint">Look up the commitment registered in the deployed GenLayer contract. This does not send a transaction.</p><div className="two"><Field label="Processor address · 40 hex characters" value={registeredCircuit.processor} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, processor: v, commitment: null })} placeholder="without 0x" /><Field label="Circuit ID · 16 hex characters" value={registeredCircuit.circuitId} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, circuitId: v, commitment: null })} placeholder="zero-padded hex" /></div><button className="primary" onClick={checkRegisteredCircuit}>Check registration <span>⌕</span></button>{registeredCircuit.commitment !== null && <div className={`result ${registeredCircuit.commitment ? "pass" : "fail"}`}>{registeredCircuit.commitment ? <><span>Registered commitment</span><code className="commitment-value">{registeredCircuit.commitment}</code></> : "No registration found for this processor and circuit ID."}</div>}</article>
+    <article className="panel xlayer-panel"><div className="panel-head"><div><span className="step">04</span><h2>Live TapeOut comparison</h2></div><span className="tag">X LAYER · 196</span></div><p className="hint">Read-only verification against the existing TapeOut processor on X Layer Mainnet. No X Layer private key is required.</p><div className="xmeta"><span>Processor <code>{xlayerProcessor}</code></span><span>Circuit <code>#{xlayerCircuitId}</code></span><span>RPC <code>{xlayerRpc}</code></span></div><button className="primary" onClick={loadXLayerCircuit}>Retrieve & compare on-chain <span>↗</span></button>{xlayer && <><p className="xmeta">Block <code>{xlayer.block}</code> · Metadata <code>{xlayer.metadata}</code></p><div className="table"><div>Input</div><div>ComputeMesh</div><div>TapeOut eval</div><div>Status</div>{xlayer.rows.map((row) => <div className="table-row" key={row.input}><code>{row.input}</code><code>{row.local}</code><code>{row.remote}</code><strong className={row.match ? "match" : "mismatch"}>{row.match ? "MATCH" : "MISMATCH"}</strong></div>)}</div></>}</article>
     {error && <div className="error">{error}</div>}
     <footer><span>COMPUTEMESH / GENLAYER</span><span>Private keys stay in your wallet · No XLayer dependency</span></footer>
   </main>;
