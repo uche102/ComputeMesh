@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "genlayer-js";
 import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
+import { proposeCircuit, type CircuitProposal } from "./aiCircuitBuilder";
 
 type NetworkName = "localnet" | "studionet" | "testnetAsimov" | "testnetBradbury";
 type Chain = typeof localnet | typeof studionet | typeof testnetAsimov | typeof testnetBradbury;
@@ -58,6 +59,10 @@ function App() {
   const [result, setResult] = useState<boolean | null>(null);
   const [registeredCircuit, setRegisteredCircuit] = useState({ processor: defaultRegisteredProcessor, circuitId: defaultRegisteredCircuitId, commitment: null as string | null });
   const [xlayer, setXlayer] = useState<{ block: string; metadata: string; netlist: string; rows: Array<{ input: string; local: string; remote: string; match: boolean }> } | null>(null);
+  const [builderDescription, setBuilderDescription] = useState("");
+  const [proposal, setProposal] = useState<CircuitProposal | null>(null);
+  const [proposalAccepted, setProposalAccepted] = useState(false);
+  const [consensus, setConsensus] = useState<{ status: string; hash: string }>({ status: "Not submitted", hash: "" });
 
   const chain = networks[network];
   const client = useMemo(() => createClient({ chain, account: account ? account as `0x${string}` : undefined, provider: window.ethereum }), [chain, account]);
@@ -153,9 +158,43 @@ function App() {
     } catch (e) { setStatus("X Layer read failed"); setError(e instanceof Error ? e.message : String(e)); }
   }
 
+  function generateProposal() {
+    setError(""); setProposalAccepted(false); setConsensus({ status: "Not submitted", hash: "" });
+    const next = proposeCircuit(builderDescription);
+    setProposal(next);
+    if (!next.needsClarification) {
+      setVerification((current) => ({ ...current, inputs: String(next.inputCount), outputs: String(next.outputCount), netlist: next.netlistHex, inputBits: "00", outputBits: "00" }));
+    }
+    setStatus("AI-assisted proposal ready for review");
+  }
+
+  async function submitSpecificationConsensus() {
+    setError("");
+    try {
+      if (!proposal || proposal.needsClarification) throw new Error("Resolve the clarification request before submitting.");
+      if (!proposalAccepted) throw new Error("Review and accept the proposed circuit first.");
+      if (!account) throw new Error("Connect a GenLayer wallet before requesting consensus.");
+      const address = requireContract();
+      setConsensus({ status: "Submitting to GenLayer validators…", hash: "" });
+      const prefix = new TextEncoder().encode("ComputeMesh/TAP-02/Circuit/v1");
+      const preimage = new Uint8Array(prefix.length + 4 + 4 + proposal.netlistHex.length / 2);
+      preimage.set(prefix, 0);
+      new DataView(preimage.buffer).setUint32(prefix.length, proposal.inputCount);
+      new DataView(preimage.buffer).setUint32(prefix.length + 4, proposal.outputCount);
+      preimage.set(Uint8Array.from(proposal.netlistHex.match(/../g)!.map((byte) => Number.parseInt(byte, 16))), prefix.length + 8);
+      const digest = await crypto.subtle.digest("SHA-256", preimage);
+      const commitment = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      setVerification((current) => ({ ...current, commitment }));
+      const draft = JSON.stringify({ purpose: proposal.purpose, inputs: proposal.inputs, outputs: proposal.outputs, behaviour: proposal.behaviour, test_cases: proposal.testCases, assumptions: [], ambiguities: [], ambiguous: false });
+      const write = await client.writeContract({ address, functionName: "approve_specification", args: [proposal.description, commitment, proposal.inputCount, proposal.outputCount, proposal.netlistHex, draft], value: 0n });
+      setConsensus({ status: "Consensus transaction submitted", hash: String(write) });
+    } catch (e) { setConsensus({ status: "Consensus failed", hash: "" }); setError(e instanceof Error ? e.message : String(e)); }
+  }
+
   return <main className="shell">
     <header className="topbar"><div className="brand"><span className="mark">CM</span><div><strong>ComputeMesh</strong><small>Deterministic circuit verification</small></div></div><div className="toolbar"><select value={network} onChange={(e) => setNetwork(e.target.value as NetworkName)}>{Object.keys(networks).map((name) => <option key={name}>{name}</option>)}</select><button className="wallet" onClick={connectWallet}>{account ? `${account.slice(0, 6)}…${account.slice(-4)}` : "Connect wallet"}</button></div></header>
     <section className="hero"><div><p className="eyebrow">TAP-02 execution layer</p><h1>Run circuits.<br /><em>Verify the result.</em></h1><p className="lede">ComputeMesh executes NAND, LATCH, and nested REF circuits locally, then asks GenLayer to independently verify the commitment and state transition.</p></div><div className="status-card"><span className="pulse" />{status}<small>{contractAddress ? `Contract ${contractAddress.slice(0, 10)}…` : "No contract address configured"}</small></div></section>
+    <article className="panel builder-panel"><div className="panel-head"><div><span className="step">00</span><h2>AI Circuit Builder</h2></div><span className="tag">REVIEW REQUIRED</span></div><p className="hint">Describe a circuit in plain language. The starter AI assistant proposes only supported TAP-02 operations; ambiguous requests are stopped for clarification.</p><Field label="Describe your circuit" value={builderDescription} onChange={setBuilderDescription} placeholder="e.g. return 1 when two inputs are different" /><button className="primary" onClick={generateProposal}>Generate proposal <span>✦</span></button>{proposal && <div className="proposal"><div className="result">{proposal.needsClarification ? `Clarification needed: ${proposal.clarification}` : <><strong>Proposed circuit — review before acceptance</strong><p>{proposal.purpose}</p><p><code>{proposal.behaviour}</code></p><p>{proposal.explanation}</p><code className="netlist">{proposal.netlistHex}</code><div className="table proposal-table"><div>Input</div><div>Expected</div>{proposal.testCases.map((test) => <div className="table-row" key={test.input}><code>{test.input}</code><code>{test.output}</code></div>)}</div><label className="review"><input type="checkbox" checked={proposalAccepted} onChange={(e) => setProposalAccepted(e.target.checked)} /> I reviewed this AI-generated proposal</label><button className="primary" disabled={!proposalAccepted} onClick={submitSpecificationConsensus}>Submit specification for GenLayer consensus <span>→</span></button><div className="result">Consensus: {consensus.status}{consensus.hash && <><br /><code>{consensus.hash}</code></>}</div></>}</div></div>}</article>
     <section className="grid"><article className="panel"><div className="panel-head"><div><span className="step">01</span><h2>Register a circuit</h2></div><span className="tag">WALLET WRITE</span></div><p className="hint">Registration binds a processor and circuit ID to its SHA-256 commitment. Only the contract administrator may register.</p><Field label="Processor address" value={registration.processor} onChange={(v) => setRegistration({ ...registration, processor: v })} placeholder="40 hex characters" /><div className="two"><Field label="Circuit ID" value={registration.id} onChange={(v) => setRegistration({ ...registration, id: v })} placeholder="16 hex characters" /><Field label="Commitment" value={registration.commitment} onChange={(v) => setRegistration({ ...registration, commitment: v })} placeholder="64 hex characters" /></div><button className="primary" onClick={registerCircuit}>Register circuit <span>↗</span></button></article>
       <article className="panel"><div className="panel-head"><div><span className="step">02</span><h2>Verify execution</h2></div><span className="tag">CONTRACT READ</span></div><p className="hint">Submit the exact packed buffers and child records used by the execution evidence.</p><div className="two"><Field label="Input bits" value={verification.inputs} onChange={(v) => setVerification({ ...verification, inputs: v })} /><Field label="Output bits" value={verification.outputs} onChange={(v) => setVerification({ ...verification, outputs: v })} /></div><Field label="Netlist · hex" value={verification.netlist} onChange={(v) => setVerification({ ...verification, netlist: v })} /><Field label="Commitment · hex" value={verification.commitment} onChange={(v) => setVerification({ ...verification, commitment: v })} placeholder="SHA-256 commitment" /><div className="two"><Field label="Initial state · hex" value={verification.state} onChange={(v) => setVerification({ ...verification, state: v })} /><Field label="Inputs · packed hex" value={verification.inputBits} onChange={(v) => setVerification({ ...verification, inputBits: v })} /></div><div className="two"><Field label="Next state · hex" value={verification.nextState} onChange={(v) => setVerification({ ...verification, nextState: v })} /><Field label="Outputs · packed hex" value={verification.outputBits} onChange={(v) => setVerification({ ...verification, outputBits: v })} /></div><Field label="Child records · JSON array" value={verification.children} onChange={(v) => setVerification({ ...verification, children: v })} /><div className="two"><Field label="Root processor" value={verification.rootProcessor} onChange={(v) => setVerification({ ...verification, rootProcessor: v })} /><Field label="Root circuit ID" value={verification.rootId} onChange={(v) => setVerification({ ...verification, rootId: v })} /></div><button className="primary" onClick={verifyExecution}>Verify execution <span>→</span></button>{result !== null && <div className={`result ${result ? "pass" : "fail"}`}>{result ? "✓ Execution accepted" : "× Execution rejected"}</div>}</article></section>
     <article className="panel registered-panel"><div className="panel-head"><div><span className="step">03</span><h2>Check Registered Circuit</h2></div><span className="tag">READ ONLY</span></div><p className="hint">Look up the commitment registered in the deployed GenLayer contract. This does not send a transaction.</p><div className="two"><Field label="Processor address · 40 hex characters" value={registeredCircuit.processor} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, processor: v, commitment: null })} placeholder="without 0x" /><Field label="Circuit ID · 16 hex characters" value={registeredCircuit.circuitId} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, circuitId: v, commitment: null })} placeholder="zero-padded hex" /></div><button className="primary" onClick={checkRegisteredCircuit}>Check registration <span>⌕</span></button>{registeredCircuit.commitment !== null && <div className={`result ${registeredCircuit.commitment ? "pass" : "fail"}`}>{registeredCircuit.commitment ? <><span>Registered commitment</span><code className="commitment-value">{registeredCircuit.commitment}</code></> : "No registration found for this processor and circuit ID."}</div>}</article>

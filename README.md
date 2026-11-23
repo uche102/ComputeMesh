@@ -129,3 +129,32 @@ for settlement or a custom registry.
 Production deployment still requires a funded GenLayer wallet and the RPC/
 network settings accepted by the supported GenLayer tooling. Network deployment
 cannot be verified from this repository without those external credentials.
+
+## AI Circuit Builder and GenLayer consensus
+
+The frontend now includes a review-gated AI Circuit Builder. It provides
+conservative starter proposals for supported TAP-02 NAND and XOR descriptions,
+requests clarification for unsupported or ambiguous descriptions, and copies a
+reviewed proposal into the existing deterministic verification form. The
+proposal is not proof of correctness and is never executed without the existing
+parser, validator, evaluator, commitment, and evidence checks.
+
+The new `approve_specification(description, commitment, input_count,
+output_count, netlist, draft)` Intelligent Contract method gives GenLayer a
+substantive role. It first recomputes the exact circuit commitment and rejects
+unsupported TAP-02 records. Its leader independently interprets the natural-language
+description with `gl.nondet.exec_prompt`; validators independently repeat that
+interpretation through `gl.vm.run_nondet_unsafe` and compare purpose, interface,
+behaviour, ambiguity status, and expected test vectors. Only an accepted result
+is stored in `approved_specifications`, keyed by the circuit commitment, and the
+method returns the hash of the canonical approved specification. Approval
+records are immutable. `verify_execution` requires the matching approved record,
+rechecks its hash, and deterministically executes every approved test vector
+before accepting the claimed execution. An ambiguous or unconsensual
+interpretation does not authorize verification.
+
+This method is prepared for a new deployment; the existing deployed contract is
+not modified automatically. After deployment, set `VITE_CONTRACT_ADDRESS` to the
+new address and rebuild the frontend. The live consensus path requires a
+GenLayer network with configured nondeterministic execution and cannot be
+proven by the local deterministic test suite alone.

@@ -2,11 +2,13 @@
 
 from genlayer import *
 import hashlib
+import json
 
 
 class ComputeMeshVerifier(gl.Contract):
     administrator: Address
     registered_commitments: TreeMap[str, str]
+    approved_specifications: TreeMap[str, str]
 
     def __init__(self):
         self.administrator = gl.message.sender_address
@@ -57,6 +59,223 @@ class ComputeMeshVerifier(gl.Contract):
             + circuit_id_hex.lower()
         )
         return self.registered_commitments.get(key, "")
+
+    @gl.public.write
+    def approve_specification(
+        self,
+        description: str,
+        circuit_commitment_hex: str,
+        input_count: int,
+        output_count: int,
+        netlist_hex: str,
+        proposed_specification_json: str,
+    ) -> str:
+        """Reach consensus on the meaning of a natural-language circuit request.
+
+        The leader and each validator independently interpret the same request.
+        Validators compare substantive semantic fields, not merely JSON shape.
+        Only the accepted interpretation is persisted and it is keyed by the
+        circuit commitment, preventing an approved description being reused for
+        a different circuit.
+        """
+        if not description or len(description) > 4096:
+            raise gl.vm.UserError("Circuit description is empty or too long")
+        if len(circuit_commitment_hex) != 64 or len(netlist_hex) % 2 != 0:
+            raise gl.vm.UserError("Circuit commitment must be 32-byte hex")
+        allowed = "0123456789abcdefABCDEF"
+        if not all(c in allowed for c in circuit_commitment_hex + netlist_hex):
+            raise gl.vm.UserError("Circuit commitment is not hexadecimal")
+        if not 0 <= input_count <= 65536 or not 1 <= output_count <= 65536:
+            raise gl.vm.UserError("Invalid circuit dimensions")
+
+        netlist = bytes.fromhex(netlist_hex)
+        expected_commitment = hashlib.sha256(
+            b"ComputeMesh/TAP-02/Circuit/v1"
+            + input_count.to_bytes(4, "big")
+            + output_count.to_bytes(4, "big")
+            + netlist
+        ).hexdigest()
+        if expected_commitment != circuit_commitment_hex.lower():
+            raise gl.vm.UserError("Circuit commitment does not match netlist")
+        approval_key = circuit_commitment_hex.lower()
+        if self.approved_specifications.get(approval_key, ""):
+            raise gl.vm.UserError("Circuit commitment already has an immutable approval")
+
+        def is_strict_hex(value):
+            return (
+                isinstance(value, str)
+                and len(value) % 2 == 0
+                and all(c in allowed for c in value)
+            )
+
+        def canonical_bits(data, bit_count):
+            expected = (bit_count + 7) // 8
+            if len(data) != expected:
+                return False
+            return not (bit_count % 8 and data and (data[-1] & (0xff << (bit_count % 8))))
+
+        # Reject malformed or unsupported TAP-02 records before consensus is
+        # allowed to approve a specification for this commitment.
+        offset = 0
+        while offset < len(netlist):
+            opcode = netlist[offset]
+            offset += 1
+            if opcode in (0x00, 0x01):
+                width = 6 if opcode == 0x00 else 3
+                if offset + width > len(netlist):
+                    raise gl.vm.UserError("Truncated TAP-02 instruction")
+                offset += width
+            elif opcode == 0x02:
+                if offset + 30 > len(netlist):
+                    raise gl.vm.UserError("Truncated TAP-02 REF")
+                input_width = netlist[offset + 28]
+                output_width = netlist[offset + 29]
+                if output_width == 0 or offset + 30 + 3 * input_width > len(netlist):
+                    raise gl.vm.UserError("Malformed TAP-02 REF")
+                offset += 30 + 3 * input_width
+            else:
+                raise gl.vm.UserError("Unsupported TAP-02 opcode")
+
+        prompt = f"""
+You are interpreting a digital logic circuit request for ComputeMesh.
+The circuit uses only TAP-02 operations: NAND (0x00), LATCH (0x01), and REF (0x02).
+Interpret the request conservatively. If it is ambiguous, set ambiguous=true and
+list the missing decisions instead of guessing.
+
+Developer request:
+{description}
+
+The proposed circuit commitment is: {circuit_commitment_hex.lower()}
+The developer's draft interpretation is:
+{proposed_specification_json}
+
+Return JSON only with exactly these fields:
+purpose (string), inputs (array of strings), outputs (array of strings),
+behaviour (string), test_cases (array of objects with hexadecimal input/output
+strings and optional state/next_state strings for LATCH circuits),
+assumptions (array of strings), ambiguities (array of strings), ambiguous (boolean),
+and circuit_commitment (lowercase string).
+Do not invent requirements absent from the request. The circuit commitment must
+be copied exactly.
+"""
+
+        def interpret() -> dict:
+            result = gl.nondet.exec_prompt(prompt, response_format="json")
+            if isinstance(result, dict):
+                return result
+            return json.loads(result)
+
+        def validate(leader_result) -> bool:
+            if not isinstance(leader_result, gl.vm.Return):
+                return False
+            try:
+                leader = leader_result.calldata
+                validator = interpret()
+                required = (
+                    "purpose", "inputs", "outputs", "behaviour", "test_cases",
+                    "assumptions", "ambiguities", "ambiguous", "circuit_commitment",
+                )
+                if any(key not in leader or key not in validator for key in required):
+                    return False
+                if leader["circuit_commitment"].lower() != circuit_commitment_hex.lower():
+                    return False
+                if validator["circuit_commitment"].lower() != circuit_commitment_hex.lower():
+                    return False
+                # Reasoning text may differ, but the accepted interpretation may
+                # not: validators must agree on purpose, interfaces, behaviour,
+                # ambiguity status, assumptions, and expected vectors.
+                semantic_fields = (
+                    "purpose", "inputs", "outputs", "behaviour", "test_cases",
+                    "assumptions", "ambiguous", "ambiguities",
+                )
+                return all(leader[field] == validator[field] for field in semantic_fields)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                return False
+
+        accepted = gl.vm.run_nondet_unsafe(interpret, validate)
+        if not isinstance(accepted, dict):
+            raise gl.vm.UserError("Consensus returned an invalid specification")
+
+        required = (
+            "purpose", "inputs", "outputs", "behaviour", "test_cases",
+            "assumptions", "ambiguities", "ambiguous", "circuit_commitment",
+        )
+        if any(field not in accepted for field in required):
+            raise gl.vm.UserError("Consensus specification is missing required fields")
+        if not isinstance(accepted["purpose"], str) or not accepted["purpose"].strip():
+            raise gl.vm.UserError("Specification purpose is empty")
+        if not isinstance(accepted["behaviour"], str) or not accepted["behaviour"].strip():
+            raise gl.vm.UserError("Specification behaviour is empty")
+        if not isinstance(accepted["inputs"], list) or not isinstance(accepted["outputs"], list):
+            raise gl.vm.UserError("Specification interfaces must be arrays")
+        if len(accepted["inputs"]) != input_count or len(accepted["outputs"]) != output_count:
+            raise gl.vm.UserError("Specification dimensions do not match circuit")
+        if len(set(accepted["inputs"])) != len(accepted["inputs"]):
+            raise gl.vm.UserError("Duplicate input name")
+        if len(set(accepted["outputs"])) != len(accepted["outputs"]):
+            raise gl.vm.UserError("Duplicate output name")
+        if not all(isinstance(value, str) and value.strip() for value in accepted["inputs"] + accepted["outputs"]):
+            raise gl.vm.UserError("Invalid input or output name")
+        if not isinstance(accepted["assumptions"], list) or not all(isinstance(value, str) and value.strip() for value in accepted["assumptions"]):
+            raise gl.vm.UserError("Invalid assumptions")
+        if not isinstance(accepted["ambiguities"], list) or not all(isinstance(value, str) for value in accepted["ambiguities"]):
+            raise gl.vm.UserError("Invalid ambiguities")
+        if not isinstance(accepted["ambiguous"], bool) or accepted["ambiguous"] or accepted["ambiguities"]:
+            raise gl.vm.UserError("Consensus found an ambiguous specification")
+        if accepted["circuit_commitment"].lower() != approval_key:
+            raise gl.vm.UserError("Consensus commitment mismatch")
+
+        vectors = accepted["test_cases"]
+        if not isinstance(vectors, list) or not vectors:
+            raise gl.vm.UserError("Specification requires test vectors")
+        seen_vectors = set()
+        for vector in vectors:
+            if not isinstance(vector, dict):
+                raise gl.vm.UserError("Malformed test vector")
+            vector_keys = set(vector.keys())
+            if not ({"input", "output"} <= vector_keys) or not vector_keys <= {"input", "output", "state", "next_state"}:
+                raise gl.vm.UserError("Test vectors contain unsupported fields")
+            vector_input = vector["input"]
+            vector_output = vector["output"]
+            if not isinstance(vector_input, str) or not isinstance(vector_output, str):
+                raise gl.vm.UserError("Malformed test vector values")
+            if not is_strict_hex(vector_input) or not is_strict_hex(vector_output):
+                raise gl.vm.UserError("Test vectors must be even-length hexadecimal")
+            input_bytes = bytes.fromhex(vector_input)
+            output_bytes = bytes.fromhex(vector_output)
+            if not canonical_bits(input_bytes, input_count) or not canonical_bits(output_bytes, output_count):
+                raise gl.vm.UserError("Test vector width does not match circuit")
+            if "state" in vector and (not isinstance(vector["state"], str) or not is_strict_hex(vector["state"])):
+                raise gl.vm.UserError("Malformed test vector state")
+            if "next_state" in vector and (not isinstance(vector["next_state"], str) or not is_strict_hex(vector["next_state"])):
+                raise gl.vm.UserError("Malformed test vector next state")
+            if ("state" in vector) != ("next_state" in vector):
+                raise gl.vm.UserError("Stateful vectors require state and next_state")
+            vector_key = vector_input.lower()
+            if vector_key in seen_vectors:
+                raise gl.vm.UserError("Contradictory or duplicate test vector")
+            seen_vectors.add(vector_key)
+
+        # Only the fields that are validated above become the persisted record.
+        canonical_specification = json.dumps(accepted, sort_keys=True, separators=(",", ":"))
+        specification_hash = hashlib.sha256(canonical_specification.encode("utf-8")).hexdigest()
+        record = json.dumps({
+            "specification": canonical_specification,
+            "specification_hash": specification_hash,
+            "circuit_commitment": approval_key,
+            "status": "APPROVED",
+            "version": 1,
+            "input_count": input_count,
+            "output_count": output_count,
+            "test_vectors": vectors,
+        }, sort_keys=True, separators=(",", ":"))
+        self.approved_specifications[approval_key] = record
+        return specification_hash
+
+    @gl.public.view
+    def get_approved_specification(self, circuit_commitment_hex: str) -> str:
+        return self.approved_specifications.get(circuit_commitment_hex.lower(), "")
+
     @gl.public.view
     def verify_execution(
         self,
@@ -201,6 +420,28 @@ class ComputeMeshVerifier(gl.Contract):
             if commitment_for(
                 input_count, output_count, root_netlist
             ) != root_commitment:
+                return False
+
+            approval_record = self.approved_specifications.get(root_commitment.hex(), "")
+            if not approval_record:
+                return False
+            approval = json.loads(approval_record)
+            if approval.get("status") != "APPROVED" or approval.get("version") != 1:
+                return False
+            if approval.get("circuit_commitment") != root_commitment.hex():
+                return False
+            if approval.get("input_count") != input_count or approval.get("output_count") != output_count:
+                return False
+            canonical_specification = approval.get("specification", "")
+            if not isinstance(canonical_specification, str) or hashlib.sha256(
+                canonical_specification.encode("utf-8")
+            ).hexdigest() != approval.get("specification_hash"):
+                return False
+            approved_specification = json.loads(canonical_specification)
+            if approved_specification.get("circuit_commitment", "").lower() != root_commitment.hex():
+                return False
+            approved_vectors = approval.get("test_vectors", [])
+            if not isinstance(approved_vectors, list) or not approved_vectors:
                 return False
 
             def parse(netlist):
@@ -441,11 +682,44 @@ class ComputeMeshVerifier(gl.Contract):
 
             if not canonical_bits(initial_state, result[0]):
                 return False
+            if result[1] != claimed_state or result[2] != claimed_outputs:
+                return False
 
-            return (
-                result[1] == claimed_state
-                and result[2] == claimed_outputs
-            )
+            # Consensus approves the expected vectors, but deterministic TAP-02
+            # execution is the authority that decides whether this circuit
+            # actually satisfies them.
+            for vector in approved_vectors:
+                if not isinstance(vector, dict):
+                    return False
+                vector_inputs = bytes.fromhex(vector.get("input", ""))
+                vector_outputs = bytes.fromhex(vector.get("output", ""))
+                vector_state = bytes.fromhex(vector.get("state", ""))
+                vector_result = execute(
+                    input_count,
+                    output_count,
+                    root_netlist,
+                    vector_state,
+                    vector_inputs,
+                    ((root_address, root_circuit_id),),
+                    0,
+                )
+                if not canonical_bits(vector_inputs, input_count):
+                    return False
+                if not canonical_bits(vector_outputs, output_count):
+                    return False
+                if vector_result[2] != vector_outputs:
+                    return False
+                if "state" not in vector:
+                    if vector_result[0] != 0:
+                        return False
+                else:
+                    if not canonical_bits(vector_state, vector_result[0]):
+                        return False
+                    expected_next = bytes.fromhex(vector.get("next_state", ""))
+                    if vector_result[1] != expected_next:
+                        return False
+
+            return True
 
         except (ValueError, TypeError, OverflowError, IndexError):
             return False

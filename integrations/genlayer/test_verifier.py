@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from test_specification_security import seed_approval
 
 
 def test_nand_execution_verification(direct_deploy):
@@ -18,6 +19,7 @@ def test_nand_execution_verification(direct_deploy):
         + bytes.fromhex(netlist_hex)
     )
     commitment_hex = hashlib.sha256(preimage).hexdigest()
+    seed_approval(contract, commitment_hex, vectors=[{"input": "01", "output": "01"}])
 
     # Inputs: 1 and 0. NAND(1, 0) = 1.
     valid = contract.verify_execution(
@@ -55,6 +57,7 @@ def test_latch_state_transition(direct_deploy):
         + bytes.fromhex(netlist_hex)
     )
     commitment_hex = hashlib.sha256(preimage).hexdigest()
+    seed_approval(contract, commitment_hex, 1, 1, [{"input": "01", "output": "00", "state": "00", "next_state": "01"}])
 
     # Old state = 0; input = 1.
     # Output = old state (0); next state = 1.
@@ -124,6 +127,7 @@ def test_ref_with_child_latch_state(direct_deploy):
         + bytes.fromhex(parent_netlist)
     )
     parent_commitment = hashlib.sha256(parent_preimage).hexdigest()
+    seed_approval(contract, parent_commitment, 1, 1, [{"input": "01", "output": "00", "state": "00", "next_state": "01"}])
 
     # Child outputs its old state (0) and advances its state to 1.
     assert contract.verify_execution(
@@ -593,6 +597,7 @@ def test_nested_ref_execution(direct_deploy):
     # Root references Child A.
     root_netlist = make_ref(child_a_id)
     root_commitment = make_commitment(root_netlist)
+    seed_approval(contract, root_commitment, 2, 1, [{"input": "01", "output": "01"}])
 
     assert contract.verify_execution(
         2, 1, root_netlist,
@@ -644,6 +649,7 @@ def test_missing_nested_ref_child_rejected(direct_deploy):
     # Root references Child A, but Child B is deliberately omitted.
     root_netlist = make_ref(child_a_id)
     root_commitment = make_commitment(root_netlist)
+    seed_approval(contract, root_commitment, 1, 1, [{"input": "01", "output": "00", "state": "00", "next_state": "01"}])
 
     assert contract.verify_execution(
         2, 1, root_netlist,
@@ -773,6 +779,7 @@ def test_nested_ref_with_latch_state(direct_deploy):
     # Root references Child A, which references Child B.
     root_netlist = make_ref(child_a_id)
     root_commitment = make_commitment(root_netlist)
+    seed_approval(contract, root_commitment, 1, 1, [{"input": "01", "output": "00", "state": "00", "next_state": "01"}])
 
     # The nested LATCH outputs its old state (0)
     # and updates its state to the input (1).
@@ -803,6 +810,7 @@ def test_latch_can_reference_future_signal(direct_deploy):
         + bytes.fromhex(netlist_hex)
     )
     commitment = hashlib.sha256(preimage).hexdigest()
+    seed_approval(contract, commitment, 1, 1, [{"input": "00", "output": "01", "state": "00", "next_state": "01"}])
 
     assert contract.verify_execution(
         1, 1,
@@ -875,6 +883,11 @@ def test_shared_differential_vectors(direct_deploy):
         )
 
         commitment_hex = hashlib.sha256(preimage).hexdigest()
+        vector = {"input": inputs_hex, "output": outputs_hex}
+        if initial_state_hex:
+            vector["state"] = initial_state_hex
+            vector["next_state"] = next_state_hex
+        seed_approval(contract, commitment_hex, int(input_count), int(output_count), [vector])
 
         assert contract.verify_execution(
             int(input_count),

@@ -1,4 +1,5 @@
 import hashlib
+from test_specification_security import seed_approval
 
 
 def test_sha256_supported(direct_deploy):
@@ -18,6 +19,7 @@ def test_sha256_supported(direct_deploy):
         + output_count.to_bytes(4, "big")
         + bytes.fromhex(netlist_hex)
     ).hexdigest()
+    seed_approval(contract, commitment)
 
     assert contract.verify_execution(
         input_count,
