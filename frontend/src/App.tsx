@@ -6,6 +6,19 @@ import { proposeCircuit, type CircuitProposal } from "./aiCircuitBuilder";
 type NetworkName = "localnet" | "studionet" | "testnetAsimov" | "testnetBradbury";
 type Chain = typeof localnet | typeof studionet | typeof testnetAsimov | typeof testnetBradbury;
 
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const value = error as { message?: unknown; shortMessage?: unknown; details?: unknown };
+    if (typeof value.shortMessage === "string") return value.shortMessage;
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.details === "string") return value.details;
+    try { return JSON.stringify(error); } catch { return "The request failed."; }
+  }
+  return "The request failed.";
+}
+
 const networks: Record<NetworkName, Chain> = {
   localnet, studionet, testnetAsimov, testnetBradbury,
 };
@@ -88,7 +101,7 @@ function App() {
       setAccount(accounts[0]);
       await createClient({ chain, account: accounts[0] as `0x${string}`, provider: window.ethereum }).connect(network);
       setStatus("Wallet connected");
-    } catch (e) { setStatus("Ready"); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setStatus("Ready"); setError(formatError(e)); }
   }
 
   async function registerCircuit() {
@@ -99,7 +112,7 @@ function App() {
       const write = { address, functionName: "register_circuit", args: [registration.processor, registration.id, registration.commitment] };
       const hash = await client.writeContract({ ...write, value: 0n });
       setStatus(`Registration submitted: ${hash}`);
-    } catch (e) { setStatus("Registration failed"); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setStatus("Registration failed"); setError(formatError(e)); }
   }
 
   async function verifyExecution() {
@@ -115,7 +128,7 @@ function App() {
         verification.rootProcessor, verification.rootId,
       ] });
       setResult(Boolean(value)); setStatus("Verification complete");
-    } catch (e) { setStatus("Verification failed"); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setStatus("Verification failed"); setError(formatError(e)); }
   }
 
   async function checkRegisteredCircuit() {
@@ -131,7 +144,7 @@ function App() {
       if (typeof commitment !== "string") throw new Error("The contract returned an invalid commitment value.");
       setRegisteredCircuit((current) => ({ ...current, commitment }));
       setStatus("Registered circuit lookup complete");
-    } catch (e) { setStatus("Registered circuit lookup failed"); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setStatus("Registered circuit lookup failed"); setError(formatError(e)); }
   }
 
   async function loadXLayerCircuit() {
@@ -155,7 +168,7 @@ function App() {
       }
       setXlayer({ block: Number(BigInt(block)).toString(), metadata: `${values[0]} in · ${values[1]} out · ${values[2]} state · ${values[3]} gates`, netlist, rows });
       setStatus("X Layer comparison complete");
-    } catch (e) { setStatus("X Layer read failed"); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setStatus("X Layer read failed"); setError(formatError(e)); }
   }
 
   function generateProposal() {
@@ -188,7 +201,7 @@ function App() {
       const draft = JSON.stringify({ purpose: proposal.purpose, inputs: proposal.inputs, outputs: proposal.outputs, behaviour: proposal.behaviour, test_cases: proposal.testCases, assumptions: [], ambiguities: [], ambiguous: false });
       const write = await client.writeContract({ address, functionName: "approve_specification", args: [proposal.description, commitment, proposal.inputCount, proposal.outputCount, proposal.netlistHex, draft], value: 0n });
       setConsensus({ status: "Consensus transaction submitted", hash: String(write) });
-    } catch (e) { setConsensus({ status: "Consensus failed", hash: "" }); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setConsensus({ status: "Consensus failed", hash: "" }); setError(formatError(e)); }
   }
 
   return <main className="shell">
@@ -200,7 +213,6 @@ function App() {
     <article className="panel registered-panel"><div className="panel-head"><div><span className="step">03</span><h2>Check Registered Circuit</h2></div><span className="tag">READ ONLY</span></div><p className="hint">Look up the commitment registered in the deployed GenLayer contract. This does not send a transaction.</p><div className="two"><Field label="Processor address · 40 hex characters" value={registeredCircuit.processor} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, processor: v, commitment: null })} placeholder="without 0x" /><Field label="Circuit ID · 16 hex characters" value={registeredCircuit.circuitId} onChange={(v) => setRegisteredCircuit({ ...registeredCircuit, circuitId: v, commitment: null })} placeholder="zero-padded hex" /></div><button className="primary" onClick={checkRegisteredCircuit}>Check registration <span>⌕</span></button>{registeredCircuit.commitment !== null && <div className={`result ${registeredCircuit.commitment ? "pass" : "fail"}`}>{registeredCircuit.commitment ? <><span>Registered commitment</span><code className="commitment-value">{registeredCircuit.commitment}</code></> : "No registration found for this processor and circuit ID."}</div>}</article>
     <article className="panel xlayer-panel"><div className="panel-head"><div><span className="step">04</span><h2>Live TapeOut comparison</h2></div><span className="tag">X LAYER · 196</span></div><p className="hint">Read-only verification against the existing TapeOut processor on X Layer Mainnet. No X Layer private key is required.</p><div className="xmeta"><span>Processor <code>{xlayerProcessor}</code></span><span>Circuit <code>#{xlayerCircuitId}</code></span><span>RPC <code>{xlayerRpc}</code></span></div><button className="primary" onClick={loadXLayerCircuit}>Retrieve & compare on-chain <span>↗</span></button>{xlayer && <><p className="xmeta">Block <code>{xlayer.block}</code> · Metadata <code>{xlayer.metadata}</code></p><div className="table"><div>Input</div><div>ComputeMesh</div><div>TapeOut eval</div><div>Status</div>{xlayer.rows.map((row) => <div className="table-row" key={row.input}><code>{row.input}</code><code>{row.local}</code><code>{row.remote}</code><strong className={row.match ? "match" : "mismatch"}>{row.match ? "MATCH" : "MISMATCH"}</strong></div>)}</div></>}</article>
     {error && <div className="error">{error}</div>}
-    <footer><span>COMPUTEMESH / GENLAYER</span><span>Private keys stay in your wallet · No XLayer dependency</span></footer>
   </main>;
 }
 
