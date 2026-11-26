@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { createClient, isSuccessful } from "genlayer-js";
+import { createClient } from "genlayer-js";
 import type { Hash } from "genlayer-js/types";
 import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
 import { proposeCircuit, type CircuitProposal } from "./aiCircuitBuilder";
+import { waitForFinalizedTransaction } from "./transactionLifecycle.mjs";
 
 type NetworkName = "localnet" | "studionet" | "testnetAsimov" | "testnetBradbury";
 type Chain = typeof localnet | typeof studionet | typeof testnetAsimov | typeof testnetBradbury;
@@ -235,16 +236,21 @@ function App() {
       const transactionId = transactionHash as Hash;
       const hash = String(transactionId);
       setConsensus({ status: "Transaction submitted; waiting for GenLayer consensus…", hash });
-      let receipt;
-      try {
-        receipt = await client.waitForFinalization({ hash: transactionId });
-      } catch (e) {
-        setConsensus({ status: "Consensus execution failed", hash });
-        throw new Error(`GenLayer transaction did not finalize: ${formatError(e)}`);
+      const outcome = await waitForFinalizedTransaction(client, transactionId);
+      if (outcome.kind === "pending-timeout") {
+        setConsensus({ status: "Consensus still pending; finalization is taking longer than expected", hash });
+        setError("The transaction is still being processed by GenLayer. Check its status again later.");
+        return;
       }
-      if (!isSuccessful(receipt)) {
+      if (outcome.kind === "network-timeout") {
+        setConsensus({ status: "Consensus status could not be verified", hash });
+        setError(`GenLayer polling timed out and the final status could not be retrieved: ${formatError(outcome.statusError || outcome.pollError)}`);
+        return;
+      }
+      if (outcome.kind === "execution-error") {
         setConsensus({ status: "Consensus execution rejected", hash });
-        throw new Error("GenLayer reached a decision but approve_specification did not finish successfully.");
+        setError("GenLayer finalized the transaction, but contract execution returned an error.");
+        return;
       }
       setConsensus({ status: "Consensus approved and execution succeeded", hash });
     } catch (e) { setError(formatError(e)); }
