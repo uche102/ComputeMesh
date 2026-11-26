@@ -213,7 +213,7 @@ function App() {
       const digest = await crypto.subtle.digest("SHA-256", preimage);
       const commitment = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
       setVerification((current) => ({ ...current, commitment }));
-      const draft = JSON.stringify({ purpose: proposal.purpose, inputs: proposal.inputs, outputs: proposal.outputs, behaviour: proposal.behaviour, test_cases: proposal.testCases, assumptions: [], ambiguities: [], ambiguous: false });
+      const draft = JSON.stringify({ purpose: proposal.purpose, inputs: proposal.inputs, outputs: proposal.outputs, behaviour: proposal.behaviour, test_cases: proposal.testCases, assumptions: [], ambiguities: [], ambiguous: false, circuit_commitment: commitment });
       const write = { address, functionName: "approve_specification", args: [proposal.description, commitment, proposal.inputCount, proposal.outputCount, proposal.netlistHex, draft], value: 0n };
       setConsensus({ status: "Estimating GenLayer fees…", hash: "" });
       let estimate;

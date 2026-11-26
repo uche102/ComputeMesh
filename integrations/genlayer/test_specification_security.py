@@ -103,7 +103,9 @@ def test_consensus_approval_persists_immutable_record(direct_vm, direct_deploy):
     )
     assert len(result) == 64
     assert direct_vm.run_validator() is True
-    assert json.loads(contract.get_approved_specification(circuit_commitment))["status"] == "APPROVED"
+    approved = json.loads(contract.get_approved_specification(circuit_commitment))
+    assert approved["status"] == "APPROVED"
+    assert json.loads(approved["specification"])["circuit_commitment"] == circuit_commitment
     with direct_vm.expect_revert():
         contract.approve_specification(
             "Return one when two inputs are not both one.",
