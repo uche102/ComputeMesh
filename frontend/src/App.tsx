@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { createClient } from "genlayer-js";
+import { createClient, isSuccessful } from "genlayer-js";
+import type { Hash } from "genlayer-js/types";
 import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
 import { proposeCircuit, type CircuitProposal } from "./aiCircuitBuilder";
 
@@ -17,6 +18,17 @@ function formatError(error: unknown): string {
     try { return JSON.stringify(error); } catch { return "The request failed."; }
   }
   return "The request failed.";
+}
+
+function isWalletRejection(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { code?: unknown; name?: unknown; message?: unknown };
+  return value.code === 4001 || value.name === "UserRejectedRequestError" ||
+    (typeof value.message === "string" && /user rejected|user denied|rejected the request/i.test(value.message));
+}
+
+function formatGen(value: bigint): string {
+  return `${Number(value) / 1e18} GEN`;
 }
 
 const networks: Record<NetworkName, Chain> = {
@@ -110,7 +122,10 @@ function App() {
       if (!account) throw new Error("Connect a wallet before registering a circuit.");
       const address = requireContract();
       const write = { address, functionName: "register_circuit", args: [registration.processor, registration.id, registration.commitment] };
-      const hash = await client.writeContract({ ...write, value: 0n });
+      const estimate = await client.estimateTransactionFeesForWrite({ ...write, value: 0n, priceCapHeadroomBps: 10000 });
+      setStatus(`Estimated registration fee: ${formatGen(estimate.feeValue)}. Opening wallet…`);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      const hash = await client.writeContract({ ...write, value: 0n, fees: { distribution: estimate.distribution, feeValue: estimate.feeValue } });
       setStatus(`Registration submitted: ${hash}`);
     } catch (e) { setStatus("Registration failed"); setError(formatError(e)); }
   }
@@ -199,9 +214,40 @@ function App() {
       const commitment = Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
       setVerification((current) => ({ ...current, commitment }));
       const draft = JSON.stringify({ purpose: proposal.purpose, inputs: proposal.inputs, outputs: proposal.outputs, behaviour: proposal.behaviour, test_cases: proposal.testCases, assumptions: [], ambiguities: [], ambiguous: false });
-      const write = await client.writeContract({ address, functionName: "approve_specification", args: [proposal.description, commitment, proposal.inputCount, proposal.outputCount, proposal.netlistHex, draft], value: 0n });
-      setConsensus({ status: "Consensus transaction submitted", hash: String(write) });
-    } catch (e) { setConsensus({ status: "Consensus failed", hash: "" }); setError(formatError(e)); }
+      const write = { address, functionName: "approve_specification", args: [proposal.description, commitment, proposal.inputCount, proposal.outputCount, proposal.netlistHex, draft], value: 0n };
+      setConsensus({ status: "Estimating GenLayer fees…", hash: "" });
+      let estimate;
+      try {
+        estimate = await client.estimateTransactionFeesForWrite({ ...write, priceCapHeadroomBps: 10000 });
+      } catch (e) {
+        setConsensus({ status: "Fee estimation failed", hash: "" });
+        throw new Error(`GenLayer fee estimation failed: ${formatError(e)}`);
+      }
+      setConsensus({ status: `Estimated fee: ${formatGen(estimate.feeValue)}. Opening wallet…`, hash: "" });
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      let transactionHash: unknown;
+      try {
+        transactionHash = await client.writeContract({ ...write, fees: { distribution: estimate.distribution, feeValue: estimate.feeValue } });
+      } catch (e) {
+        setConsensus({ status: isWalletRejection(e) ? "Wallet signature rejected" : "Transaction submission failed", hash: "" });
+        throw e;
+      }
+      const transactionId = transactionHash as Hash;
+      const hash = String(transactionId);
+      setConsensus({ status: "Transaction submitted; waiting for GenLayer consensus…", hash });
+      let receipt;
+      try {
+        receipt = await client.waitForFinalization({ hash: transactionId });
+      } catch (e) {
+        setConsensus({ status: "Consensus execution failed", hash });
+        throw new Error(`GenLayer transaction did not finalize: ${formatError(e)}`);
+      }
+      if (!isSuccessful(receipt)) {
+        setConsensus({ status: "Consensus execution rejected", hash });
+        throw new Error("GenLayer reached a decision but approve_specification did not finish successfully.");
+      }
+      setConsensus({ status: "Consensus approved and execution succeeded", hash });
+    } catch (e) { setError(formatError(e)); }
   }
 
   return <main className="shell">
