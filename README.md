@@ -95,10 +95,33 @@ GenLayer receipt, place it in `frontend/.env` as `VITE_CONTRACT_ADDRESS`, and
 rebuild the frontend. The deployment helper has not been run against a live
 network in this repository because no wallet or RPC credentials are present.
 
+The current Studionet frontend deployment is configured for verifier
+`0x3Dc90F4fEd216d0156c2B7c5608ae848DaA94AE9`. Its administrator is the
+deployment wallet `0x182AA06f65C5a2b17d0DCB32a5C48Ba7AB5A7ece`, as confirmed by
+the deployer. Circuit registration, specification approval, and incompatible
+approval recovery require that wallet. Existing registrations and approvals on
+the previous contract address are not present on this deployment and must be
+re-established there by the administrator.
+
 The contract administrator is the deployment sender; only that address can
-register child commitments. `scripts/deploy_genlayer.py` supplies the actual
-SDK deployment path. Supply RPC URL, network, and private key through the
-ignored environment file, never source code.
+register child commitments or approve specifications. This authorization is
+contract-side, so an unrelated wallet cannot occupy a circuit's approval slot.
+Approval also recomputes the commitment and deterministically executes every
+submitted direct NAND/LATCH vector before storing the immutable record. REF
+vectors are rejected at approval time because their child definitions are not
+part of the approval call; REF execution remains supported by `verify_execution`
+after registered child records are supplied.
+
+If a legacy deployment contains an incompatible approval, the administrator may
+call `recover_incompatible_approval(commitment, input_count, output_count,
+netlist, expected_specification_hash)`. The contract recomputes the commitment,
+checks the exact stored hash, and revokes the record only when its stored vectors
+fail deterministic execution. Valid approvals cannot be revoked or overwritten;
+the revoked record can then be replaced through the normal administrator-only
+approval flow. The recovery method is not an unrestricted reset.
+
+`scripts/deploy_genlayer.py` supplies the actual SDK deployment path. Supply RPC
+URL and private key through the ignored environment file, never source code.
 
 ## Configuration and X Layer TapeOut integration
 
@@ -139,8 +162,8 @@ reviewed proposal into the existing deterministic verification form. The
 proposal is not proof of correctness and is never executed without the existing
 parser, validator, evaluator, commitment, and evidence checks.
 
-The new `approve_specification(description, commitment, input_count,
-output_count, netlist, draft)` Intelligent Contract method gives GenLayer a
+The new administrator-only `approve_specification(description, commitment,
+input_count, output_count, netlist, draft)` Intelligent Contract method gives GenLayer a
 substantive role. It first recomputes the exact circuit commitment and rejects
 unsupported TAP-02 records. Its leader independently interprets the natural-language
 description with `gl.nondet.exec_prompt`; validators independently repeat that
@@ -152,6 +175,12 @@ records are immutable. `verify_execution` requires the matching approved record,
 rechecks its hash, and deterministically executes every approved test vector
 before accepting the claimed execution. An ambiguous or unconsensual
 interpretation does not authorize verification.
+
+The frontend passes the same SHA-256 commitment as both the circuit argument and
+the draft's `circuit_commitment` field. A new deployment is required for these
+authorization, vector-validation, and recovery rules; update
+`VITE_CONTRACT_ADDRESS` only after recording and testing that new address. The
+existing deployed contract and its approvals are not changed automatically.
 
 This method is prepared for a new deployment; the existing deployed contract is
 not modified automatically. After deployment, set `VITE_CONTRACT_ADDRESS` to the

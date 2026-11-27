@@ -37,6 +37,7 @@ const networks: Record<NetworkName, Chain> = {
 };
 
 const contractAddress = import.meta.env.VITE_CONTRACT_ADDRESS as string | undefined;
+const contractAdministrator = (import.meta.env.VITE_CONTRACT_ADMIN_ADDRESS || "0x182AA06f65C5a2b17d0DCB32a5C48Ba7AB5A7ECE") as string;
 const initialNetwork = (import.meta.env.VITE_GENLAYER_NETWORK || "localnet") as NetworkName;
 const xlayerRpc = (import.meta.env.VITE_XLAYER_RPC_URL || "https://rpc.xlayer.tech") as string;
 const xlayerChainId = Number(import.meta.env.VITE_XLAYER_CHAIN_ID || "196");
@@ -105,6 +106,14 @@ function App() {
     return contractAddress as `0x${string}`;
   };
 
+  const requireAdministrator = () => {
+    if (!account) throw new Error("Connect the contract administrator wallet before this operation.");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(contractAdministrator)) throw new Error("VITE_CONTRACT_ADMIN_ADDRESS is invalid.");
+    if (account.toLowerCase() !== contractAdministrator.toLowerCase()) {
+      throw new Error(`This operation requires the contract administrator wallet ${contractAdministrator}.`);
+    }
+  };
+
   async function connectWallet() {
     setError(""); setStatus("Connecting wallet…");
     try {
@@ -121,6 +130,7 @@ function App() {
     setError(""); setStatus("Preparing registration…");
     try {
       if (!account) throw new Error("Connect a wallet before registering a circuit.");
+      requireAdministrator();
       const address = requireContract();
       const write = { address, functionName: "register_circuit", args: [registration.processor, registration.id, registration.commitment] };
       const estimate = await client.estimateTransactionFeesForWrite({ ...write, value: 0n, priceCapHeadroomBps: 10000 });
@@ -203,6 +213,7 @@ function App() {
       if (!proposal || proposal.needsClarification) throw new Error("Resolve the clarification request before submitting.");
       if (!proposalAccepted) throw new Error("Review and accept the proposed circuit first.");
       if (!account) throw new Error("Connect a GenLayer wallet before requesting consensus.");
+      requireAdministrator();
       const address = requireContract();
       setConsensus({ status: "Submitting to GenLayer validators…", hash: "" });
       const prefix = new TextEncoder().encode("ComputeMesh/TAP-02/Circuit/v1");
@@ -253,7 +264,12 @@ function App() {
         return;
       }
       setConsensus({ status: "Consensus approved and execution succeeded", hash });
-    } catch (e) { setError(formatError(e)); }
+    } catch (e) {
+      const message = formatError(e);
+      setError(/already has an immutable approval/i.test(message)
+        ? "This circuit already has an immutable approval. The administrator must verify it or use recover_incompatible_approval before retrying."
+        : message);
+    }
   }
 
   return <main className="shell">

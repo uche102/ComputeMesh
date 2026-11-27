@@ -12,6 +12,120 @@ class ComputeMeshVerifier(gl.Contract):
 
     def __init__(self):
         self.administrator = gl.message.sender_address
+
+    def _approval_vectors_match_circuit(
+        self, input_count, output_count, netlist, vectors
+    ) -> bool:
+        """Deterministically execute direct TAP-02 vectors before approval.
+
+        REF approvals require child context and are intentionally rejected here;
+        they must use the registered-circuit verification path instead of being
+        immutably approved without the referenced circuit definitions.
+        """
+        signals_count = 2 + input_count
+        elements = []
+        offset = 0
+        while offset < len(netlist):
+            opcode = netlist[offset]
+            offset += 1
+            if opcode == 0x00:
+                if offset + 6 > len(netlist):
+                    return False
+                a = int.from_bytes(netlist[offset:offset + 3], "big")
+                b = int.from_bytes(netlist[offset + 3:offset + 6], "big")
+                offset += 6
+                if a >= signals_count or b >= signals_count:
+                    return False
+                elements.append((opcode, (a, b)))
+                signals_count += 1
+            elif opcode == 0x01:
+                if offset + 3 > len(netlist):
+                    return False
+                d = int.from_bytes(netlist[offset:offset + 3], "big")
+                offset += 3
+                if d >= signals_count:
+                    return False
+                elements.append((opcode, (d,)))
+                signals_count += 1
+            elif opcode == 0x02:
+                return False
+            else:
+                return False
+
+        state_count = sum(1 for opcode, _ in elements if opcode == 0x01)
+        if output_count > signals_count - 2:
+            return False
+
+        def read_bit(data, index):
+            return bool(data[index // 8] & (1 << (index % 8)))
+
+        def canonical(data, bit_count):
+            if len(data) != (bit_count + 7) // 8:
+                return False
+            return not (bit_count % 8 and data and data[-1] & (0xff << (bit_count % 8)))
+
+        for vector in vectors:
+            if not isinstance(vector, dict):
+                return False
+            vector_input = vector.get("input", "")
+            vector_output = vector.get("output", "")
+            if not isinstance(vector_input, str) or not isinstance(vector_output, str):
+                return False
+            try:
+                inputs = bytes.fromhex(vector_input)
+                expected_output = bytes.fromhex(vector_output)
+                state = bytes.fromhex(vector.get("state", ""))
+            except (TypeError, ValueError):
+                return False
+            if not canonical(inputs, input_count) or not canonical(expected_output, output_count):
+                return False
+            if state_count and "state" not in vector:
+                return False
+            if not state_count and ("state" in vector or "next_state" in vector):
+                return False
+            if state_count and not canonical(state, state_count):
+                return False
+
+            signals = [False, True]
+            signals.extend(read_bit(inputs, index) for index in range(input_count))
+            next_state = []
+            latch_index = 0
+            for opcode, refs in elements:
+                if opcode == 0x00:
+                    signals.append(not (signals[refs[0]] and signals[refs[1]]))
+                else:
+                    signals.append(read_bit(state, latch_index))
+                    next_state.append(signals[refs[0]])
+                    latch_index += 1
+            output = bytearray((output_count + 7) // 8)
+            for index, bit in enumerate(signals[-output_count:]):
+                if bit:
+                    output[index // 8] |= 1 << (index % 8)
+            if bytes(output) != expected_output:
+                return False
+            if state_count:
+                try:
+                    expected_next = bytes.fromhex(vector["next_state"])
+                except (KeyError, TypeError, ValueError):
+                    return False
+                packed_next = bytearray((state_count + 7) // 8)
+                for index, bit in enumerate(next_state):
+                    if bit:
+                        packed_next[index // 8] |= 1 << (index % 8)
+                if bytes(packed_next) != expected_next or not canonical(expected_next, state_count):
+                    return False
+        return True
+
+    def _commitment_matches_netlist(self, input_count, output_count, netlist_hex, commitment_hex):
+        try:
+            return hashlib.sha256(
+                b"ComputeMesh/TAP-02/Circuit/v1"
+                + input_count.to_bytes(4, "big")
+                + output_count.to_bytes(4, "big")
+                + bytes.fromhex(netlist_hex)
+            ).hexdigest() == commitment_hex.lower()
+        except (TypeError, ValueError, OverflowError):
+            return False
     @gl.public.write
     def register_circuit(
         self,
@@ -78,6 +192,8 @@ class ComputeMeshVerifier(gl.Contract):
         circuit commitment, preventing an approved description being reused for
         a different circuit.
         """
+        if gl.message.sender_address != self.administrator:
+            raise gl.vm.UserError("Only the circuit administrator may approve specifications")
         if not description or len(description) > 4096:
             raise gl.vm.UserError("Circuit description is empty or too long")
         if len(circuit_commitment_hex) != 64 or len(netlist_hex) % 2 != 0:
@@ -98,7 +214,8 @@ class ComputeMeshVerifier(gl.Contract):
         if expected_commitment != circuit_commitment_hex.lower():
             raise gl.vm.UserError("Circuit commitment does not match netlist")
         approval_key = circuit_commitment_hex.lower()
-        if self.approved_specifications.get(approval_key, ""):
+        existing = self.approved_specifications.get(approval_key, "")
+        if existing and json.loads(existing).get("status") != "REVOKED":
             raise gl.vm.UserError("Circuit commitment already has an immutable approval")
 
         def is_strict_hex(value):
@@ -256,6 +373,9 @@ be copied exactly.
                 raise gl.vm.UserError("Contradictory or duplicate test vector")
             seen_vectors.add(vector_key)
 
+        if not self._approval_vectors_match_circuit(input_count, output_count, netlist, vectors):
+            raise gl.vm.UserError("Test vectors do not match the committed circuit")
+
         # Only the fields that are validated above become the persisted record.
         canonical_specification = json.dumps(accepted, sort_keys=True, separators=(",", ":"))
         specification_hash = hashlib.sha256(canonical_specification.encode("utf-8")).hexdigest()
@@ -271,6 +391,39 @@ be copied exactly.
         }, sort_keys=True, separators=(",", ":"))
         self.approved_specifications[approval_key] = record
         return specification_hash
+
+    @gl.public.write
+    def recover_incompatible_approval(
+        self,
+        circuit_commitment_hex: str,
+        input_count: int,
+        output_count: int,
+        netlist_hex: str,
+        expected_specification_hash: str,
+    ) -> bool:
+        """Revoke only an existing approval proven incompatible with its circuit."""
+        if gl.message.sender_address != self.administrator:
+            raise gl.vm.UserError("Only the circuit administrator may recover approvals")
+        if len(expected_specification_hash) != 64 or not self._commitment_matches_netlist(
+            input_count, output_count, netlist_hex, circuit_commitment_hex
+        ):
+            raise gl.vm.UserError("Recovery commitment does not match netlist")
+        key = circuit_commitment_hex.lower()
+        raw = self.approved_specifications.get(key, "")
+        if not raw:
+            raise gl.vm.UserError("No approval exists for this circuit")
+        record = json.loads(raw)
+        if record.get("status") != "APPROVED" or record.get("specification_hash") != expected_specification_hash.lower():
+            raise gl.vm.UserError("Approval hash or status does not match")
+        if record.get("input_count") != input_count or record.get("output_count") != output_count:
+            raise gl.vm.UserError("Approval dimensions do not match circuit")
+        vectors = record.get("test_vectors", [])
+        if self._approval_vectors_match_circuit(input_count, output_count, bytes.fromhex(netlist_hex), vectors):
+            raise gl.vm.UserError("Approval is compatible and cannot be revoked")
+        record["status"] = "REVOKED"
+        record["recovery_reason"] = "INCOMPATIBLE_TEST_VECTORS"
+        self.approved_specifications[key] = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        return True
 
     @gl.public.view
     def get_approved_specification(self, circuit_commitment_hex: str) -> str:
