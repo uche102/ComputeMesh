@@ -8,6 +8,7 @@ import json
 class ComputeMeshVerifier(gl.Contract):
     administrator: Address
     registered_commitments: TreeMap[str, str]
+    registered_owners: TreeMap[str, str]
     approved_specifications: TreeMap[str, str]
 
     def __init__(self):
@@ -133,9 +134,6 @@ class ComputeMeshVerifier(gl.Contract):
         circuit_id_hex: str,
         commitment_hex: str,
     ) -> bool:
-        if gl.message.sender_address != self.administrator:
-            return False
-
         if len(processor_address_hex) != 40:
             return False
         if len(circuit_id_hex) != 16:
@@ -159,7 +157,20 @@ class ComputeMeshVerifier(gl.Contract):
             return False
 
         self.registered_commitments[key] = commitment_hex.lower()
+        # Store the caller, rather than trusting a frontend-supplied owner.
+        # The processor/circuit-id pair is the stable circuit identity used by
+        # execution evidence and cannot be claimed twice.
+        self.registered_owners[key] = str(gl.message.sender_address)
         return True
+
+    @gl.public.view
+    def get_registered_owner(
+        self,
+        processor_address_hex: str,
+        circuit_id_hex: str,
+    ) -> str:
+        key = processor_address_hex.lower() + ":" + circuit_id_hex.lower()
+        return self.registered_owners.get(key, "")
 
     @gl.public.view
     def get_registered_commitment(
@@ -177,6 +188,8 @@ class ComputeMeshVerifier(gl.Contract):
     @gl.public.write
     def approve_specification(
         self,
+        processor_address_hex: str,
+        circuit_id_hex: str,
         description: str,
         circuit_commitment_hex: str,
         input_count: int,
@@ -192,13 +205,23 @@ class ComputeMeshVerifier(gl.Contract):
         circuit commitment, preventing an approved description being reused for
         a different circuit.
         """
-        if gl.message.sender_address != self.administrator:
-            raise gl.vm.UserError("Only the circuit administrator may approve specifications")
+        identity_key = processor_address_hex.lower() + ":" + circuit_id_hex.lower()
+        registered_commitment = self.registered_commitments.get(identity_key, "")
+        if not registered_commitment:
+            raise gl.vm.UserError("Circuit is not registered")
+        if registered_commitment != circuit_commitment_hex.lower():
+            raise gl.vm.UserError("Circuit identity is not bound to this commitment")
+        if self.registered_owners.get(identity_key, "") != str(gl.message.sender_address):
+            raise gl.vm.UserError("Only the registered circuit owner may approve specifications")
         if not description or len(description) > 4096:
             raise gl.vm.UserError("Circuit description is empty or too long")
         if len(circuit_commitment_hex) != 64 or len(netlist_hex) % 2 != 0:
             raise gl.vm.UserError("Circuit commitment must be 32-byte hex")
         allowed = "0123456789abcdefABCDEF"
+        if len(processor_address_hex) != 40 or len(circuit_id_hex) != 16:
+            raise gl.vm.UserError("Invalid circuit identity")
+        if not all(c in allowed for c in processor_address_hex + circuit_id_hex):
+            raise gl.vm.UserError("Circuit identity is not hexadecimal")
         if not all(c in allowed for c in circuit_commitment_hex + netlist_hex):
             raise gl.vm.UserError("Circuit commitment is not hexadecimal")
         if not 0 <= input_count <= 65536 or not 1 <= output_count <= 65536:
@@ -388,6 +411,9 @@ be copied exactly.
             "input_count": input_count,
             "output_count": output_count,
             "test_vectors": vectors,
+            "processor_address": processor_address_hex.lower(),
+            "circuit_id": circuit_id_hex.lower(),
+            "owner": str(gl.message.sender_address),
         }, sort_keys=True, separators=(",", ":"))
         self.approved_specifications[approval_key] = record
         return specification_hash
@@ -417,6 +443,9 @@ be copied exactly.
             raise gl.vm.UserError("Approval hash or status does not match")
         if record.get("input_count") != input_count or record.get("output_count") != output_count:
             raise gl.vm.UserError("Approval dimensions do not match circuit")
+        identity_key = record.get("processor_address", "") + ":" + record.get("circuit_id", "")
+        if self.registered_commitments.get(identity_key, "") != key:
+            raise gl.vm.UserError("Approval identity is not registered for this commitment")
         vectors = record.get("test_vectors", [])
         if self._approval_vectors_match_circuit(input_count, output_count, bytes.fromhex(netlist_hex), vectors):
             raise gl.vm.UserError("Approval is compatible and cannot be revoked")

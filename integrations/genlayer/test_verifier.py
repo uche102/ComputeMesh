@@ -436,22 +436,28 @@ def test_registered_child_commitment_mismatch_rejected(direct_deploy):
 
     assert result is False
 
-def test_unauthorized_registration_rejected(
-    direct_vm, direct_deploy, direct_alice
+def test_registration_is_permissionless_and_owner_bound(
+    direct_vm, direct_deploy, direct_alice, direct_bob
 ):
     contract = direct_deploy(
         "integrations/genlayer/contracts/computemesh_verifier.py"
     )
 
     direct_vm.sender = direct_alice
-
-    result = contract.register_circuit(
+    first = contract.register_circuit(
         "11" * 20,
         "0000000000000005",
         "22" * 32,
     )
+    direct_vm.sender = direct_bob
+    second = contract.register_circuit(
+        "11" * 20, "0000000000000006", "33" * 32
+    )
 
-    assert result is False
+    assert first is True
+    assert second is True
+    assert contract.get_registered_owner("11" * 20, "0000000000000005").lower() == "0x" + direct_alice.hex()
+    assert contract.get_registered_owner("11" * 20, "0000000000000006").lower() == "0x" + direct_bob.hex()
 
 def test_duplicate_registration_rejected(direct_deploy):
     contract = direct_deploy(

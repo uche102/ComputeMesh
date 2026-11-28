@@ -4,6 +4,8 @@ import json
 
 CONTRACT = "integrations/genlayer/contracts/computemesh_verifier.py"
 NETLIST = "00000002000003"
+PROCESSOR = "11" * 20
+CIRCUIT_ID = "0000000000000001"
 
 
 def commitment(input_count=2, output_count=1, netlist=NETLIST):
@@ -38,8 +40,15 @@ def seed_approval(contract, circuit_commitment, input_count=2, output_count=1, v
         "input_count": input_count,
         "output_count": output_count,
         "test_vectors": specification["test_cases"],
+        "processor_address": PROCESSOR,
+        "circuit_id": CIRCUIT_ID,
+        "owner": "",
     }, sort_keys=True, separators=(",", ":"))
     contract.approved_specifications[circuit_commitment] = record
+
+
+def register(contract, commitment_value):
+    assert contract.register_circuit(PROCESSOR, CIRCUIT_ID, commitment_value) is True
 
 
 def test_verification_requires_specification_approval(direct_deploy):
@@ -81,6 +90,7 @@ def test_tampered_approval_hash_is_rejected(direct_deploy):
 def test_consensus_approval_persists_immutable_record(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     circuit_commitment = commitment()
+    register(contract, circuit_commitment)
     specification = {
         "purpose": "Return NAND",
         "inputs": ["a", "b"],
@@ -94,7 +104,7 @@ def test_consensus_approval_persists_immutable_record(direct_vm, direct_deploy):
     }
     direct_vm.mock_llm("ComputeMesh", json.dumps(specification))
     result = contract.approve_specification(
-        "Return one when two inputs are not both one.",
+        PROCESSOR, CIRCUIT_ID, "Return one when two inputs are not both one.",
         circuit_commitment,
         2,
         1,
@@ -108,7 +118,7 @@ def test_consensus_approval_persists_immutable_record(direct_vm, direct_deploy):
     assert json.loads(approved["specification"])["circuit_commitment"] == circuit_commitment
     with direct_vm.expect_revert():
         contract.approve_specification(
-            "Return one when two inputs are not both one.",
+            PROCESSOR, CIRCUIT_ID, "Return one when two inputs are not both one.",
             circuit_commitment,
             2,
             1,
@@ -120,6 +130,7 @@ def test_consensus_approval_persists_immutable_record(direct_vm, direct_deploy):
 def test_unrelated_caller_cannot_consume_approval_slot(direct_vm, direct_deploy, direct_alice):
     contract = direct_deploy(CONTRACT)
     circuit_commitment = commitment()
+    register(contract, circuit_commitment)
     specification = {
         "purpose": "Return NAND",
         "inputs": ["a", "b"],
@@ -135,7 +146,7 @@ def test_unrelated_caller_cannot_consume_approval_slot(direct_vm, direct_deploy,
     direct_vm.mock_llm("ComputeMesh", json.dumps(specification))
     with direct_vm.expect_revert():
         contract.approve_specification(
-            "Unrelated intent", circuit_commitment, 2, 1, NETLIST,
+            PROCESSOR, CIRCUIT_ID, "Unrelated intent", circuit_commitment, 2, 1, NETLIST,
             json.dumps(specification),
         )
     assert contract.get_approved_specification(circuit_commitment) == ""
@@ -144,6 +155,7 @@ def test_unrelated_caller_cannot_consume_approval_slot(direct_vm, direct_deploy,
 def test_incompatible_vectors_are_rejected_before_storage(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     circuit_commitment = commitment()
+    register(contract, circuit_commitment)
     specification = {
         "purpose": "Return NAND",
         "inputs": ["a", "b"],
@@ -158,7 +170,7 @@ def test_incompatible_vectors_are_rejected_before_storage(direct_vm, direct_depl
     direct_vm.mock_llm("ComputeMesh", json.dumps(specification))
     with direct_vm.expect_revert():
         contract.approve_specification(
-            "Return NAND", circuit_commitment, 2, 1, NETLIST,
+            PROCESSOR, CIRCUIT_ID, "Return NAND", circuit_commitment, 2, 1, NETLIST,
             json.dumps(specification),
         )
     assert contract.get_approved_specification(circuit_commitment) == ""
@@ -169,7 +181,7 @@ def test_approval_rejects_commitment_that_does_not_match_netlist(direct_vm, dire
     wrong_commitment = "00" * 32
     with direct_vm.expect_revert():
         contract.approve_specification(
-            "Return NAND", wrong_commitment, 2, 1, NETLIST,
+            PROCESSOR, CIRCUIT_ID, "Return NAND", wrong_commitment, 2, 1, NETLIST,
             json.dumps({"circuit_commitment": wrong_commitment}),
         )
     assert contract.get_approved_specification(wrong_commitment) == ""
@@ -178,6 +190,7 @@ def test_approval_rejects_commitment_that_does_not_match_netlist(direct_vm, dire
 def test_incompatible_approval_can_be_recovered_then_reapproved(direct_vm, direct_deploy):
     contract = direct_deploy(CONTRACT)
     circuit_commitment = commitment()
+    register(contract, circuit_commitment)
     seed_approval(contract, circuit_commitment, vectors=[{"input": "01", "output": "00"}])
     record = json.loads(contract.approved_specifications[circuit_commitment])
     assert contract.recover_incompatible_approval(
@@ -198,7 +211,7 @@ def test_incompatible_approval_can_be_recovered_then_reapproved(direct_vm, direc
     }
     direct_vm.mock_llm("ComputeMesh", json.dumps(specification))
     assert len(contract.approve_specification(
-        "Return NAND", circuit_commitment, 2, 1, NETLIST,
+        PROCESSOR, CIRCUIT_ID, "Return NAND", circuit_commitment, 2, 1, NETLIST,
         json.dumps(specification),
     )) == 64
 

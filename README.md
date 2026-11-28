@@ -103,9 +103,12 @@ approval recovery require that wallet. Existing registrations and approvals on
 the previous contract address are not present on this deployment and must be
 re-established there by the administrator.
 
-The contract administrator is the deployment sender; only that address can
-register child commitments or approve specifications. This authorization is
-contract-side, so an unrelated wallet cannot occupy a circuit's approval slot.
+The contract administrator is the deployment sender, but routine registration
+and specification approval are permissionless at the contract level. Each
+processor/circuit-ID pair is registered once and stores the registering wallet
+as its owner. Approval requires that owner, the exact registered commitment,
+and the same circuit identity, so an unrelated wallet cannot occupy the
+circuit's approval slot.
 Approval also recomputes the commitment and deterministically executes every
 submitted direct NAND/LATCH vector before storing the immutable record. REF
 vectors are rejected at approval time because their child definitions are not
@@ -153,6 +156,37 @@ Production deployment still requires a funded GenLayer wallet and the RPC/
 network settings accepted by the supported GenLayer tooling. Network deployment
 cannot be verified from this repository without those external credentials.
 
+## Read-only inspection of the deployed verifier
+
+`scripts/inspect_genlayer_contract.py` performs only RPC connectivity checks,
+optional wallet balance reads, and `gen_call` reads against the configured
+verifier. It does not import or call deployment, write, or simulation methods.
+The installed `genlayer-py==0.16.3` client requires an account object even for
+`gen_call`, so the script creates an unfunded ephemeral read-only sender in
+memory. It never prints or requires a private key for public reads. Wallet
+environment variables are optional and are used only for balance checks.
+
+The repository contains local TAP-02 fixtures but no verified processor/circuit
+identity registered on the deployed Studionet contract. When the three
+`COMPUTEMESH_*` variables are absent, circuit lookup is reported as `SKIPPED`;
+the script does not treat a skipped lookup as a pass or invent identifiers.
+
+Run the inspection from a network-enabled Linux environment:
+
+```sh
+. .venv/bin/activate
+export COMPUTEMESH_PROCESSOR_HEX=<registered processor, if known>
+export COMPUTEMESH_CIRCUIT_ID_HEX=<registered 16-hex circuit id, if known>
+export COMPUTEMESH_COMMITMENT_HEX=<matching 64-hex commitment, if known>
+python scripts/inspect_genlayer_contract.py
+```
+
+Leave the three variables unset to validate Studionet connectivity without a
+circuit lookup. Do not put wallet keys in tracked files. If balance checks are
+needed, provide `GENLAYER_WALLET_A_PRIVATE_KEY` and optionally
+`GENLAYER_WALLET_B_PRIVATE_KEY` in the process environment; the script prints
+only derived public addresses and balances.
+
 ## AI Circuit Builder and GenLayer consensus
 
 The frontend now includes a review-gated AI Circuit Builder. It provides
@@ -162,8 +196,8 @@ reviewed proposal into the existing deterministic verification form. The
 proposal is not proof of correctness and is never executed without the existing
 parser, validator, evaluator, commitment, and evidence checks.
 
-The new administrator-only `approve_specification(description, commitment,
-input_count, output_count, netlist, draft)` Intelligent Contract method gives GenLayer a
+The owner-scoped `approve_specification(processor, circuit_id, description,
+commitment, input_count, output_count, netlist, draft)` Intelligent Contract method gives GenLayer a
 substantive role. It first recomputes the exact circuit commitment and rejects
 unsupported TAP-02 records. Its leader independently interprets the natural-language
 description with `gl.nondet.exec_prompt`; validators independently repeat that
@@ -183,7 +217,11 @@ authorization, vector-validation, and recovery rules; update
 existing deployed contract and its approvals are not changed automatically.
 
 This method is prepared for a new deployment; the existing deployed contract is
-not modified automatically. After deployment, set `VITE_CONTRACT_ADDRESS` to the
-new address and rebuild the frontend. The live consensus path requires a
+not modified automatically. Because storage schema and the approval ABI changed,
+a new deployment (or an explicitly tested migration contract) is required; the
+old deployment cannot be upgraded in place by this repository. Existing
+registrations and approvals remain on the old address and must be migrated by a
+deliberate owner/admin process before switching the frontend. After deployment,
+set `VITE_CONTRACT_ADDRESS` to the new address and rebuild the frontend. The live consensus path requires a
 GenLayer network with configured nondeterministic execution and cannot be
 proven by the local deterministic test suite alone.
